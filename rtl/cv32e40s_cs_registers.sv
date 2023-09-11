@@ -601,7 +601,7 @@ module cv32e40s_cs_registers import cv32e40s_pkg::*;
 
       // mscratchcsw: Scratch Swap for Multiple Privilege Modes
       CSR_MSCRATCHCSW: begin
-        if (CLIC) begin
+        if (CLIC && USER) begin
           // CLIC spec 13.2
           // Depending on mstatus.MPP, we return either mscratch_rdata or rs1 to rd.
           // Safe to use mstatus_rdata here (EX timing), as there is a generic stall of the ID stage
@@ -1034,7 +1034,7 @@ module cv32e40s_cs_registers import cv32e40s_pkg::*;
 
     // TODO: add support for SD/XS/FS/VS
     mstatus_n     = '{
-                                  tw:   csr_wdata_int[MSTATUS_TW_BIT],
+                                  tw:   mstatus_tw_resolve(mstatus_rdata.tw, csr_wdata_int[MSTATUS_TW_BIT]),
                                   mprv: mstatus_mprv_resolve(mstatus_rdata.mprv, csr_wdata_int[MSTATUS_MPRV_BIT]),
                                   mpp:  mstatus_mpp_resolve(mstatus_rdata.mpp, csr_wdata_int[MSTATUS_MPP_BIT_HIGH:MSTATUS_MPP_BIT_LOW]),
                                   mpie: csr_wdata_int[MSTATUS_MPIE_BIT],
@@ -1318,7 +1318,7 @@ module cv32e40s_cs_registers import cv32e40s_pkg::*;
         end
 
         CSR_MSCRATCHCSW: begin
-          if (CLIC) begin
+          if (CLIC && USER) begin
             // mscratchcsw operates on mscratch
             // Writing only when mstatus.mpp != PRIV_LVL_M
             if (mstatus_rdata.mpp != PRIV_LVL_M) begin
@@ -2230,80 +2230,91 @@ module cv32e40s_cs_registers import cv32e40s_pkg::*;
 
   assign csr_wr_in_wb_flush_o = xsecure_csr_wr_in_wb || pmp_csr_wr_in_wb || jvt_wr_in_wb;
 
-  // Privilege level register
-  cv32e40s_csr
-  #(
-    .LIB        (LIB),
-    .WIDTH      ($bits(privlvl_t)),
-    .MASK       (CSR_PRV_LVL_MASK),
-    .SHADOWCOPY (SECURE),
-    .RESETVALUE (PRIV_LVL_M)
-  )
-  priv_lvl_i
-  (
-    .clk            ( clk                   ),
-    .rst_n          ( rst_n                 ),
-    .scan_cg_en_i   ( scan_cg_en_i          ),
-    .wr_data_i      ( priv_lvl_n            ),
-    .wr_en_i        ( priv_lvl_we           ),
-    .rd_data_o      ( priv_lvl_q_int        ),
-    .rd_error_o     ( priv_lvl_rd_error     )
-  );
+  if (USER) begin : privlvl_user
+    // Privilege level register
+    cv32e40s_csr
+      #(
+        .LIB        (LIB),
+        .WIDTH      ($bits(privlvl_t)),
+        .MASK       (CSR_PRV_LVL_MASK),
+        .SHADOWCOPY (SECURE),
+        .RESETVALUE (PRIV_LVL_M)
+        )
+    priv_lvl_i
+      (
+       .clk            ( clk                   ),
+       .rst_n          ( rst_n                 ),
+       .scan_cg_en_i   ( scan_cg_en_i          ),
+       .wr_data_i      ( priv_lvl_n            ),
+       .wr_en_i        ( priv_lvl_we           ),
+       .rd_data_o      ( priv_lvl_q_int        ),
+       .rd_error_o     ( priv_lvl_rd_error     )
+       );
 
-  assign priv_lvl_q = privlvl_t'(priv_lvl_q_int);
+    assign priv_lvl_q = privlvl_t'(priv_lvl_q_int);
 
-  // Generate priviledge level for the IF stage
-  // Since MRET may change the priviledge level and can is taken from ID,
-  // the priviledge level for the IF stage needs to be predictive
-  always_comb begin
-    priv_lvl_if_ctrl_o.priv_lvl     = priv_lvl_rdata;
-    priv_lvl_if_ctrl_o.priv_lvl_set = 1'b0;
-
-    if (priv_lvl_we) begin
-      // Priviledge level updated by MRET in WB or exception
-      priv_lvl_if_ctrl_o.priv_lvl     = priv_lvl_n;
-      priv_lvl_if_ctrl_o.priv_lvl_set = 1'b1;
-    end
-    else if (ctrl_fsm_i.mret_jump_id) begin
-      // MRET in ID. Set IF stage priviledge level to mstatus.mpp
-      // Using mstatus_rdata.mpp is safe since a write to mstatus.mpp in EX or WB it will cause a stall
-      priv_lvl_if_ctrl_o.priv_lvl     = privlvl_t'(mstatus_rdata.mpp);
-      priv_lvl_if_ctrl_o.priv_lvl_set = 1'b1;
-    end
-    else if ((id_ex_pipe_i.sys_en && id_ex_pipe_i.sys_mret_insn && ctrl_fsm_i.kill_ex) ||
-             (ex_wb_pipe_i.sys_en && ex_wb_pipe_i.sys_mret_insn && ctrl_fsm_i.kill_wb) ||
-             (sys_en_id_i && sys_mret_id_i && ctrl_fsm_i.kill_id)) begin
-      // MRET got killed before retiring in the WB stage. Restore IF priviledge level
-      // In most cases, the logic behind priv_lvl_we and priv_lvl_n will take care of this.
-      // The exception is if debug mode is entered after MRET jump from ID is taken, and the MRET is killed.
-      // TODO: revisit this when implementing the debug related parts of user mode
+    // Generate priviledge level for the IF stage
+    // Since MRET may change the priviledge level and can is taken from ID,
+    // the priviledge level for the IF stage needs to be predictive
+    always_comb begin
       priv_lvl_if_ctrl_o.priv_lvl     = priv_lvl_rdata;
-      priv_lvl_if_ctrl_o.priv_lvl_set = 1'b1;
+      priv_lvl_if_ctrl_o.priv_lvl_set = 1'b0;
+
+      if (priv_lvl_we) begin
+        // Priviledge level updated by MRET in WB or exception
+        priv_lvl_if_ctrl_o.priv_lvl     = priv_lvl_n;
+        priv_lvl_if_ctrl_o.priv_lvl_set = 1'b1;
+      end
+      else if (ctrl_fsm_i.mret_jump_id) begin
+        // MRET in ID. Set IF stage priviledge level to mstatus.mpp
+        // Using mstatus_rdata.mpp is safe since a write to mstatus.mpp in EX or WB it will cause a stall
+        priv_lvl_if_ctrl_o.priv_lvl     = privlvl_t'(mstatus_rdata.mpp);
+        priv_lvl_if_ctrl_o.priv_lvl_set = 1'b1;
+      end
+      else if ((id_ex_pipe_i.sys_en && id_ex_pipe_i.sys_mret_insn && ctrl_fsm_i.kill_ex) ||
+               (ex_wb_pipe_i.sys_en && ex_wb_pipe_i.sys_mret_insn && ctrl_fsm_i.kill_wb) ||
+               (sys_en_id_i && sys_mret_id_i && ctrl_fsm_i.kill_id)) begin
+        // MRET got killed before retiring in the WB stage. Restore IF priviledge level
+        // In most cases, the logic behind priv_lvl_we and priv_lvl_n will take care of this.
+        // The exception is if debug mode is entered after MRET jump from ID is taken, and the MRET is killed.
+        // TODO: revisit this when implementing the debug related parts of user mode
+        priv_lvl_if_ctrl_o.priv_lvl     = priv_lvl_rdata;
+        priv_lvl_if_ctrl_o.priv_lvl_set = 1'b1;
+      end
     end
+
+    // Lookahead for priv_lvl_lsu_o. Updates to MPRV or MPP in WB needs to take effect for load/stores in EX
+    always_comb begin
+      if (mstatus_we) begin
+        priv_lvl_lsu_o = mstatus_n.mprv ? privlvl_t'(mstatus_n.mpp) : id_ex_pipe_i.priv_lvl;
+      end
+      else begin
+        priv_lvl_lsu_o = mstatus_rdata.mprv ? privlvl_t'(mstatus_rdata.mpp) : id_ex_pipe_i.priv_lvl;
+      end
+    end
+
+    // Privilege level for CLIC pointer fetches in IF
+    // When an interrupt is taken, the pipeline is killed. The privilege level will be changed, so in case
+    // of a privilege level change, we need to use the level in the priv_lvl_if_ctrl_o when mprv is not set.
+    // priv_lvl_if_ctrl_o should carry the correct privilege level.
+    always_comb begin
+      if (mstatus_we) begin
+        priv_lvl_clic_ptr_o = mstatus_n.mprv ? privlvl_t'(mstatus_n.mpp) : priv_lvl_if_ctrl_o.priv_lvl;
+      end
+      else begin
+        priv_lvl_clic_ptr_o = mstatus_q.mprv ? privlvl_t'(mstatus_q.mpp) : priv_lvl_if_ctrl_o.priv_lvl;
+      end
+    end
+  end else begin : no_privlvl_user
+    assign priv_lvl_q = PRIV_LVL_M;
+    assign priv_lvl_rd_error = 1'b0;
+
+    assign priv_lvl_if_ctrl_o.priv_lvl     = PRIV_LVL_M;
+    assign priv_lvl_if_ctrl_o.priv_lvl_set = 1'b0;
+
+    assign priv_lvl_lsu_o = PRIV_LVL_M;
   end
 
-  // Lookahead for priv_lvl_lsu_o. Updates to MPRV or MPP in WB needs to take effect for load/stores in EX
-  always_comb begin
-    if (mstatus_we) begin
-      priv_lvl_lsu_o = mstatus_n.mprv ? privlvl_t'(mstatus_n.mpp) : id_ex_pipe_i.priv_lvl;
-    end
-    else begin
-      priv_lvl_lsu_o = mstatus_rdata.mprv ? privlvl_t'(mstatus_rdata.mpp) : id_ex_pipe_i.priv_lvl;
-    end
-  end
-
-  // Privilege level for CLIC pointer fetches in IF
-  // When an interrupt is taken, the pipeline is killed. The privilege level will be changed, so in case
-  // of a privilege level change, we need to use the level in the priv_lvl_if_ctrl_o when mprv is not set.
-  // priv_lvl_if_ctrl_o should carry the correct privilege level.
-  always_comb begin
-    if (mstatus_we) begin
-      priv_lvl_clic_ptr_o = mstatus_n.mprv ? privlvl_t'(mstatus_n.mpp) : priv_lvl_if_ctrl_o.priv_lvl;
-    end
-    else begin
-      priv_lvl_clic_ptr_o = mstatus_q.mprv ? privlvl_t'(mstatus_q.mpp) : priv_lvl_if_ctrl_o.priv_lvl;
-    end
-  end
 
   generate
     if (PMP_NUM_REGIONS > 0) begin: csr_pmp

@@ -539,7 +539,7 @@ typedef enum logic[1:0] {
   PRIV_LVL_U = 2'b00
 } privlvl_t;
 
-parameter privlvl_t PRIV_LVL_LOWEST = PRIV_LVL_U;
+parameter privlvl_t PRIV_LVL_LOWEST = (USER) ? PRIV_LVL_U : PRIV_LVL_M;
 
 // Struct used for setting privilege lelve
 typedef struct packed {
@@ -795,6 +795,9 @@ parameter logic [31:0] TDATA1_RST_VAL = {
 // Enable Security Features
 parameter SECURE = 1;
 
+// Enable User Mode
+parameter bit USER = SECURE;
+
 // Register file read/write ports
 parameter REGFILE_NUM_WRITE_PORTS = 1;
 
@@ -990,7 +993,7 @@ parameter EXC_CAUSE_ECALL_MMODE           = 11'h0B;
 parameter EXC_CAUSE_INSTR_INTEGRITY_FAULT = 11'h19;
 parameter EXC_CAUSE_INSTR_BUS_FAULT       = 11'h18;
 
-parameter logic [31:0] ETRIGGER_TDATA2_MASK = (1 << EXC_CAUSE_INSTR_BUS_FAULT) | (1 << EXC_CAUSE_INSTR_INTEGRITY_FAULT) | (1 << EXC_CAUSE_ECALL_MMODE) | (1 << EXC_CAUSE_ECALL_UMODE) | (1 << EXC_CAUSE_STORE_FAULT) |
+parameter logic [31:0] ETRIGGER_TDATA2_MASK = (1 << EXC_CAUSE_INSTR_BUS_FAULT) | (1 << EXC_CAUSE_INSTR_INTEGRITY_FAULT) | (1 << EXC_CAUSE_ECALL_MMODE) | ((USER) << EXC_CAUSE_ECALL_UMODE) | (1 << EXC_CAUSE_STORE_FAULT) |
                                               (1 << EXC_CAUSE_LOAD_FAULT) | (1 << EXC_CAUSE_BREAKPOINT) | (1 << EXC_CAUSE_ILLEGAL_INSN) | (1 << EXC_CAUSE_INSTR_FAULT);
 
 parameter INT_CAUSE_LSU_LOAD_FAULT            = 11'h400;
@@ -1522,8 +1525,13 @@ typedef struct packed {
     privlvl_t   current_value,
     logic [1:0] next_value
   );
-    // dcsr.prv is WARL(0x0, 0x3)
-    return ((next_value != PRIV_LVL_M) && (next_value != PRIV_LVL_U)) ? current_value : privlvl_t'(next_value);
+    if (USER) begin
+      // dcsr.prv is WARL(0x0, 0x3)
+      return ((next_value != PRIV_LVL_M) && (next_value != PRIV_LVL_U)) ? current_value : privlvl_t'(next_value);
+    end else begin
+      // dcsr.prv is WARL(0x3)
+      return PRIV_LVL_M;
+    end
   endfunction
 
   function automatic logic dcsr_ebreaku_resolve
@@ -1531,8 +1539,14 @@ typedef struct packed {
     logic       current_value,
     logic       next_value
   );
-    // dcsr.ebreaku is WARL
-    return next_value;
+    if (USER) begin
+      // dcsr.ebreaku is WARL
+      return next_value;
+    end else begin
+      // dcsr.ebreaku is WARL(0x0)
+      return 1'b0;
+    end
+
   endfunction
 
   function automatic logic [1:0] mstatus_mpp_resolve
@@ -1540,8 +1554,14 @@ typedef struct packed {
     logic [1:0] current_value,
     logic [1:0] next_value
   );
-    // mstatus.mpp is WARL(0x0, 0x3)
-    return ((next_value != PRIV_LVL_M) && (next_value != PRIV_LVL_U)) ? current_value : next_value;
+    if (USER) begin
+      // mstatus.mpp is WARL(0x0, 0x3)
+      return ((next_value != PRIV_LVL_M) && (next_value != PRIV_LVL_U)) ? current_value : next_value;
+    end else begin
+      // mstatus.mpp is WARL(0x3)
+      return PRIV_LVL_M;
+    end
+
   endfunction
 
   function automatic logic [1:0] mcause_mpp_resolve
@@ -1549,8 +1569,14 @@ typedef struct packed {
     logic [1:0] current_value,
     logic [1:0] next_value
   );
-    // mcause.mpp is WARL(0x0, 0x3)
-    return ((next_value != PRIV_LVL_M) && (next_value != PRIV_LVL_U)) ? current_value : next_value;
+    if (USER) begin
+      // mcause.mpp is WARL(0x0, 0x3)
+      return ((next_value != PRIV_LVL_M) && (next_value != PRIV_LVL_U)) ? current_value : next_value;
+    end else begin
+      // mcause.mpp is WARL(0x3)
+      return PRIV_LVL_M;
+    end
+
   endfunction
 
   function automatic logic mstatus_mprv_resolve
@@ -1558,8 +1584,26 @@ typedef struct packed {
     logic current_value,
     logic next_value
   );
-    // mstatus.mprv is is RW
-    return next_value;
+    if (USER) begin
+      // mstatus.mprv is is RW
+      return next_value;
+    end else begin
+      // mstatus.mprv is WARL(0x0)
+      return 1'b0;
+    end
+  endfunction
+
+  function automatic logic mstatus_tw_resolve
+  (
+   logic current_value,
+   logic next_value
+  );
+    if (USER) begin
+      // mstatus.tw is is RW
+      return next_value;
+    end else begin
+      return 1'b0;
+    end
   endfunction
 
   function automatic logic [3:0] mcontrol2_6_match_resolve
@@ -1573,16 +1617,26 @@ typedef struct packed {
   (
     logic next_value
   );
-    // mcontrol6.u is WARL
-    return next_value;
+    if (USER) begin
+      // mcontrol6.u is WARL
+      return next_value;
+    end else begin
+      // mcontrol2/6.u is WARL(0x0)
+      return 1'b0;
+    end
   endfunction
 
   function automatic logic etrigger_u_resolve
   (
     logic next_value
   );
-    // etrigger.u is WARL
-    return next_value;
+    if (USER) begin
+      // etrigger.u is WARL
+      return next_value;
+    end else begin
+      // etrigger.u is WARL(0x0)
+      return 1'b0;
+    end
   endfunction
 
   function automatic logic[1:0] mtvec_mode_clint_resolve
